@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { createRoot } from 'react-dom/client';
 import { 
   TrendingUp, 
@@ -16,7 +16,12 @@ import {
   RefreshCw,
   X,
   PieChart,
-  ArrowRight
+  ArrowRight,
+  Bell,
+  BellPlus,
+  Trash2,
+  CheckCircle2,
+  AlertCircle
 } from 'lucide-react';
 import { GoogleGenAI } from "@google/genai";
 
@@ -55,6 +60,23 @@ interface ScoreBreakdown {
   sector: number;
   total: number;
   grade: string;
+}
+
+interface StockAlert {
+  id: string;
+  symbol: string;
+  type: 'Price' | 'Score';
+  condition: 'Above' | 'Below';
+  threshold: number;
+  active: boolean;
+  createdAt: number;
+}
+
+interface ToastMessage {
+  id: string;
+  title: string;
+  message: string;
+  type: 'success' | 'info' | 'alert';
 }
 
 // --- Mock Data Constants ---
@@ -124,7 +146,6 @@ const calculateScore = (stock: StockData): ScoreBreakdown => {
 
   let institutional = stock.fiiHoldingChange > 0 ? 5 : (stock.fiiHoldingChange === 0 ? 3 : 0);
   
-  // Sector strength (mock logic)
   let sectorScore = SECTORS.indexOf(stock.sector) % 2 === 0 ? 5 : 3;
 
   const total = trend + volume + breakout + growth + financial + valuation + institutional + sectorScore;
@@ -151,11 +172,61 @@ const App: React.FC = () => {
   const [filterSector, setFilterSector] = useState('All');
   const [sortConfig, setSortConfig] = useState<{ key: string, direction: 'asc' | 'desc' }>({ key: 'score', direction: 'desc' });
 
+  // Alerts & Notifications State
+  const [alerts, setAlerts] = useState<StockAlert[]>([]);
+  const [toasts, setToasts] = useState<ToastMessage[]>([]);
+  const [isAlertManagerOpen, setIsAlertManagerOpen] = useState(false);
+  const [newAlertForm, setNewAlertForm] = useState<Partial<StockAlert>>({
+    type: 'Price',
+    condition: 'Above',
+    threshold: 0
+  });
+
   useEffect(() => {
     generateMockData();
   }, []);
 
-  const generateMockData = () => {
+  // Alert Checking Logic
+  useEffect(() => {
+    if (stocks.length > 0 && alerts.length > 0) {
+      alerts.forEach(alert => {
+        if (!alert.active) return;
+        const stock = stocks.find(s => s.symbol === alert.symbol);
+        if (!stock) return;
+
+        const score = calculateScore(stock).total;
+        const currentValue = alert.type === 'Price' ? stock.price : score;
+        
+        const isTriggered = alert.condition === 'Above' 
+          ? currentValue >= alert.threshold 
+          : currentValue <= alert.threshold;
+
+        if (isTriggered) {
+          addToast({
+            title: 'Alert Triggered!',
+            message: `${stock.symbol} ${alert.type} is ${alert.condition.toLowerCase()} ${alert.threshold}. Current: ${alert.type === 'Price' ? formatCurrency(currentValue) : currentValue}`,
+            type: 'alert'
+          });
+          // Deactivate alert after trigger to prevent spam
+          setAlerts(prev => prev.map(a => a.id === alert.id ? { ...a, active: false } : a));
+        }
+      });
+    }
+  }, [stocks, alerts]);
+
+  const addToast = (toast: Omit<ToastMessage, 'id'>) => {
+    const id = Math.random().toString(36).substr(2, 9);
+    setToasts(prev => [...prev, { ...toast, id }]);
+    setTimeout(() => {
+      setToasts(prev => prev.filter(t => t.id !== id));
+    }, 5000);
+  };
+
+  const removeToast = (id: string) => {
+    setToasts(prev => prev.filter(t => t.id !== id));
+  };
+
+  const generateMockData = useCallback(() => {
     setLoading(true);
     setTimeout(() => {
       const data: StockData[] = TOP_SYMBOLS.map(sym => {
@@ -187,7 +258,7 @@ const App: React.FC = () => {
       setStocks(data);
       setLoading(false);
     }, 1500);
-  };
+  }, []);
 
   const sortedStocks = useMemo(() => {
     let filtered = stocks.filter(s => 
@@ -219,6 +290,38 @@ const App: React.FC = () => {
       key,
       direction: prev.key === key && prev.direction === 'desc' ? 'asc' : 'desc'
     }));
+  };
+
+  const createAlert = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newAlertForm.symbol || !newAlertForm.threshold) return;
+
+    const alert: StockAlert = {
+      id: Math.random().toString(36).substr(2, 9),
+      symbol: newAlertForm.symbol,
+      type: newAlertForm.type as 'Price' | 'Score',
+      condition: newAlertForm.condition as 'Above' | 'Below',
+      threshold: Number(newAlertForm.threshold),
+      active: true,
+      createdAt: Date.now()
+    };
+
+    setAlerts(prev => [alert, ...prev]);
+    addToast({
+      title: 'Alert Created',
+      message: `Watching ${alert.symbol} for ${alert.type} ${alert.condition.toLowerCase()} ${alert.threshold}`,
+      type: 'success'
+    });
+    setNewAlertForm({ type: 'Price', condition: 'Above', threshold: 0 });
+  };
+
+  const removeAlert = (id: string) => {
+    setAlerts(prev => prev.filter(a => a.id !== id));
+    addToast({
+      title: 'Alert Removed',
+      message: 'The alert has been deleted successfully.',
+      type: 'info'
+    });
   };
 
   const getAiExplanation = async (stock: StockData) => {
@@ -264,6 +367,25 @@ const App: React.FC = () => {
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 p-4 md:p-8">
+      {/* Toast Notifications */}
+      <div className="fixed top-4 right-4 z-[100] flex flex-col gap-3 w-80">
+        {toasts.map(toast => (
+          <div key={toast.id} className={`p-4 rounded-xl border shadow-2xl animate-in slide-in-from-right-10 duration-300 flex items-start gap-3 ${
+            toast.type === 'alert' ? 'bg-red-900/90 border-red-500' : 
+            toast.type === 'success' ? 'bg-emerald-900/90 border-emerald-500' : 'bg-slate-900/90 border-slate-700'
+          }`}>
+            {toast.type === 'alert' ? <AlertCircle className="h-5 w-5 text-red-400 mt-0.5" /> : <CheckCircle2 className="h-5 w-5 text-emerald-400 mt-0.5" />}
+            <div className="flex-1">
+              <h4 className="font-bold text-sm">{toast.title}</h4>
+              <p className="text-xs text-slate-300 mt-1">{toast.message}</p>
+            </div>
+            <button onClick={() => removeToast(toast.id)} className="p-1 hover:bg-white/10 rounded">
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+        ))}
+      </div>
+
       {/* Header */}
       <header className="max-w-7xl mx-auto flex flex-col md:flex-row justify-between items-center mb-8 gap-4">
         <div>
@@ -274,6 +396,15 @@ const App: React.FC = () => {
           <p className="text-slate-400 mt-1">Real-time NSE scoring engine for swing & short-term trades</p>
         </div>
         <div className="flex items-center gap-3">
+          <button 
+            onClick={() => setIsAlertManagerOpen(true)}
+            className="relative p-2 bg-slate-800 hover:bg-slate-700 rounded-lg transition-colors border border-slate-700"
+          >
+            <Bell className="h-5 w-5" />
+            {alerts.some(a => a.active) && (
+              <span className="absolute top-1 right-1 h-2.5 w-2.5 bg-red-500 border-2 border-slate-800 rounded-full"></span>
+            )}
+          </button>
           <button 
             onClick={generateMockData}
             className="flex items-center gap-2 bg-slate-800 hover:bg-slate-700 px-4 py-2 rounded-lg transition-colors border border-slate-700"
@@ -294,7 +425,7 @@ const App: React.FC = () => {
           { label: 'Scanned Stocks', value: stocks.length, icon: Activity, color: 'text-blue-400' },
           { label: 'Top Opportunities', value: stocks.filter(s => calculateScore(s).total > 80).length, icon: Zap, color: 'text-yellow-400' },
           { label: 'Avg Mkt Score', value: Math.round(stocks.reduce((acc, s) => acc + calculateScore(s).total, 0) / (stocks.length || 1)), icon: PieChart, color: 'text-purple-400' },
-          { label: 'Sector of Day', value: 'Energy', icon: ShieldCheck, color: 'text-emerald-400' },
+          { label: 'Active Alerts', value: alerts.filter(a => a.active).length, icon: Bell, color: 'text-emerald-400' },
         ].map((stat, i) => (
           <div key={i} className="bg-slate-900/50 border border-slate-800 p-4 rounded-xl flex items-center gap-4">
             <div className={`p-3 rounded-lg bg-slate-800 ${stat.color}`}>
@@ -460,7 +591,7 @@ const App: React.FC = () => {
                   ))}
                 </div>
 
-                {/* TradingView Widget (Mocked or simple Placeholder) */}
+                {/* TradingView Widget Placeholder */}
                 <div className="bg-slate-950 rounded-xl border border-slate-800 p-4 min-h-[400px] flex flex-col items-center justify-center relative">
                    <div className="absolute top-4 left-4 text-xs font-mono text-slate-500 bg-slate-900 px-2 py-1 rounded">TRADINGVIEW ENGINE PREVIEW</div>
                    <BarChart3 className="h-24 w-24 text-slate-800 mb-4" />
@@ -558,15 +689,6 @@ const App: React.FC = () => {
                       </button>
                     </div>
                   )}
-                  {aiExplanation && (
-                    <button 
-                      onClick={() => getAiExplanation(selectedStock)}
-                      disabled={aiLoading}
-                      className="mt-4 text-xs text-slate-500 hover:text-emerald-400 flex items-center gap-1 mx-auto"
-                    >
-                      <RefreshCw className={`h-3 w-3 ${aiLoading ? 'animate-spin' : ''}`} /> Re-analyze
-                    </button>
-                  )}
                 </div>
 
                 <div className="bg-blue-600/10 border border-blue-500/20 p-5 rounded-2xl">
@@ -583,9 +705,124 @@ const App: React.FC = () => {
                   <button className="w-full bg-slate-100 hover:bg-white text-slate-950 font-bold py-4 rounded-xl transition-all shadow-xl flex items-center justify-center gap-2">
                     Add to Watchlist
                   </button>
-                  <button className="w-full bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold py-4 rounded-xl border border-slate-700 flex items-center justify-center gap-2">
-                    Set Price Alert
+                  <button 
+                    onClick={() => {
+                      setNewAlertForm({
+                        symbol: selectedStock.symbol,
+                        type: 'Price',
+                        condition: 'Above',
+                        threshold: Math.round(selectedStock.price * 1.05)
+                      });
+                      setIsAlertManagerOpen(true);
+                      setSelectedStock(null);
+                    }}
+                    className="w-full bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold py-4 rounded-xl border border-slate-700 flex items-center justify-center gap-2"
+                  >
+                    <BellPlus className="h-5 w-5" /> Set Price Alert
                   </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Alert Manager Modal */}
+      {isAlertManagerOpen && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-300">
+          <div className="bg-slate-900 border border-slate-800 w-full max-w-2xl rounded-2xl shadow-2xl flex flex-col max-h-[80vh]">
+            <div className="p-6 border-b border-slate-800 flex justify-between items-center">
+              <h2 className="text-xl font-bold flex items-center gap-2"><Bell className="h-5 w-5 text-emerald-400" /> Alert Manager</h2>
+              <button onClick={() => setIsAlertManagerOpen(false)} className="p-2 hover:bg-slate-800 rounded-full"><X className="h-6 w-6" /></button>
+            </div>
+            
+            <div className="p-6 overflow-y-auto flex-1 space-y-8">
+              {/* Alert Creation Form */}
+              <div className="bg-slate-800/50 p-4 rounded-xl border border-slate-700">
+                <h3 className="text-sm font-bold uppercase text-slate-400 mb-4">Create New Alert</h3>
+                <form onSubmit={createAlert} className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div>
+                    <label className="text-xs text-slate-500 mb-1 block">Stock Symbol</label>
+                    <select 
+                      className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-sm outline-none focus:ring-1 focus:ring-emerald-500"
+                      value={newAlertForm.symbol || ''}
+                      onChange={e => setNewAlertForm(prev => ({ ...prev, symbol: e.target.value }))}
+                      required
+                    >
+                      <option value="">Select Symbol</option>
+                      {TOP_SYMBOLS.map(s => <option key={s.s} value={s.s}>{s.s}</option>)}
+                    </select>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="text-xs text-slate-500 mb-1 block">Metric</label>
+                      <select 
+                        className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-sm outline-none focus:ring-1 focus:ring-emerald-500"
+                        value={newAlertForm.type}
+                        onChange={e => setNewAlertForm(prev => ({ ...prev, type: e.target.value as any }))}
+                      >
+                        <option value="Price">Price</option>
+                        <option value="Score">Score</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="text-xs text-slate-500 mb-1 block">Trigger</label>
+                      <select 
+                        className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-sm outline-none focus:ring-1 focus:ring-emerald-500"
+                        value={newAlertForm.condition}
+                        onChange={e => setNewAlertForm(prev => ({ ...prev, condition: e.target.value as any }))}
+                      >
+                        <option value="Above">Above</option>
+                        <option value="Below">Below</option>
+                      </select>
+                    </div>
+                  </div>
+                  <div>
+                    <label className="text-xs text-slate-500 mb-1 block">Threshold Value</label>
+                    <input 
+                      type="number" 
+                      className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-sm outline-none focus:ring-1 focus:ring-emerald-500"
+                      value={newAlertForm.threshold || ''}
+                      placeholder={newAlertForm.type === 'Price' ? 'e.g. 2400' : 'e.g. 85'}
+                      onChange={e => setNewAlertForm(prev => ({ ...prev, threshold: Number(e.target.value) }))}
+                      required
+                    />
+                  </div>
+                  <div className="flex items-end">
+                    <button type="submit" className="w-full bg-emerald-600 hover:bg-emerald-500 text-white py-2 rounded-lg font-bold text-sm transition-all shadow-lg flex items-center justify-center gap-2">
+                      <BellPlus className="h-4 w-4" /> Save Alert
+                    </button>
+                  </div>
+                </form>
+              </div>
+
+              {/* Active Alerts List */}
+              <div>
+                <h3 className="text-sm font-bold uppercase text-slate-400 mb-4">Your Active Alerts</h3>
+                <div className="space-y-3">
+                  {alerts.length === 0 ? (
+                    <div className="text-center py-8 text-slate-600">No alerts set yet.</div>
+                  ) : alerts.map(alert => (
+                    <div key={alert.id} className={`flex items-center justify-between p-4 rounded-xl border ${alert.active ? 'bg-slate-800/30 border-slate-700' : 'bg-slate-900 border-slate-800 opacity-50'}`}>
+                      <div className="flex items-center gap-4">
+                        <div className={`p-2 rounded-lg ${alert.active ? 'bg-emerald-500/10 text-emerald-400' : 'bg-slate-800 text-slate-500'}`}>
+                          <Bell className="h-5 w-5" />
+                        </div>
+                        <div>
+                          <div className="font-bold flex items-center gap-2">
+                            {alert.symbol} 
+                            {!alert.active && <span className="text-[10px] bg-slate-700 text-slate-400 px-1.5 rounded uppercase">Triggered</span>}
+                          </div>
+                          <div className="text-xs text-slate-500">
+                            Notify when {alert.type} is {alert.condition.toLowerCase()} {alert.type === 'Price' ? formatCurrency(alert.threshold) : alert.threshold}
+                          </div>
+                        </div>
+                      </div>
+                      <button onClick={() => removeAlert(alert.id)} className="p-2 text-slate-500 hover:text-red-400 hover:bg-red-400/10 rounded-lg transition-colors">
+                        <Trash2 className="h-4 w-4" />
+                      </button>
+                    </div>
+                  ))}
                 </div>
               </div>
             </div>
