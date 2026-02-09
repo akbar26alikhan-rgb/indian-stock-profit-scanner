@@ -29,7 +29,8 @@ import {
   Workflow,
   Globe,
   Clock,
-  ZapOff
+  ZapOff,
+  Timer
 } from 'lucide-react';
 import { GoogleGenAI } from "@google/genai";
 
@@ -242,7 +243,7 @@ const calculateScore = (stock: StockData): ScoreBreakdown => {
   
   const total = trend + volume + breakout + growth + financial + valuation + institutional;
 
-  // Technical Indicators (Mock logic tied to actual price action)
+  // Technical Indicators
   const rsi = Math.max(25, Math.min(85, 50 + (stock.changePercent * 6) + (volRatio * 2) - (stock.price < stock.dma50 ? 10 : 0)));
   const macdVal = stock.price > stock.dma50 && stock.changePercent > 0 ? 'Bullish Crossover' : (stock.price < stock.dma50 * 0.98 ? 'Bearish Crossover' : 'Neutral');
   const momentum = rsi > 68 ? 'Exhausted' : (rsi < 42 ? 'Weak' : 'Strong');
@@ -256,28 +257,20 @@ const calculateScore = (stock: StockData): ScoreBreakdown => {
   else if (rsi < 35) justification.push("RSI Oversold: Potential exhaustion in selling pressure detected.");
   else justification.push("Momentum stable: RSI is in a healthy range for trend continuation.");
 
-  if (volRatio > 1.4) justification.push("Volume surge: Institutional accumulation or distribution is likely occurring.");
+  if (volRatio > 1.4) justification.push("Volume surge: Institutional accumulation or distribution likely occurring.");
 
   const technicals: Technicals = { rsi, macd: macdVal as any, momentum, justification };
 
-  // --- Final Signal Logic ---
+  // Final Signal Logic
   let signal: TradeSignal = 'HOLD';
-  
-  // High-conviction BUY: Good score, not overbought, bullish trend
   if (total >= 70 && rsi < 68 && isAbove200) signal = 'BUY';
-  // Immediate SELL: Bearish trend, weak momentum, or extremely overbought
   else if (total < 35 || rsi > 78 || (!isAbove200 && stock.changePercent < -1.5)) signal = 'SELL';
 
-  // --- Stop Loss and Target Calculation ---
-  // SL: Usually placed below 200 DMA or 5% below entry, whichever is more conservative
+  // Stop Loss and Target
   let stopLoss = Math.min(stock.price * 0.95, stock.dma200 * 0.98);
-  if (stock.price < stock.dma200) stopLoss = stock.price * 0.94; // If already below 200DMA
-
-  // Target: Based on 2:1 Reward-to-Risk ratio or next major resistance (simulated)
+  if (stock.price < stock.dma200) stopLoss = stock.price * 0.94;
   const risk = stock.price - stopLoss;
   let target = stock.price + (risk * 2.2); 
-  
-  // Capping target based on typical swing trade expectations (10-25%)
   const maxSwingTarget = stock.price * 1.25;
   target = Math.min(target, maxSwingTarget);
 
@@ -298,6 +291,7 @@ const App: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [syncLoading, setSyncLoading] = useState(false);
   const [lastSyncTime, setLastSyncTime] = useState<string | null>(null);
+  const [countdown, setCountdown] = useState(30);
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedStock, setSelectedStock] = useState<StockData | null>(null);
   const [selectedExchange, setSelectedExchange] = useState<'NSE' | 'BSE'>('NSE');
@@ -332,17 +326,16 @@ const App: React.FC = () => {
     else setLoading(true);
 
     try {
-      // Step 1: Initialize with realistic baseline data
       const baseData: StockData[] = TOP_SYMBOLS.map(sym => {
-        const price = sym.base + (Math.random() - 0.5) * (sym.base * 0.01);
+        const price = sym.base + (Math.random() - 0.5) * (sym.base * 0.015);
         const dma200 = price * (0.88 + Math.random() * 0.1);
         const dma50 = price * (0.96 + Math.random() * 0.08);
         return {
           symbol: sym.s,
           name: sym.n,
           price: price,
-          change: (Math.random() - 0.5) * (price * 0.01),
-          changePercent: (Math.random() - 0.5) * 1.5,
+          change: (Math.random() - 0.5) * (price * 0.012),
+          changePercent: (Math.random() - 0.5) * 1.8,
           volume: Math.floor(Math.random() * 1000000) + 100000,
           avgVolume: Math.floor(Math.random() * 800000) + 100000,
           dma50: dma50,
@@ -360,7 +353,6 @@ const App: React.FC = () => {
         };
       });
 
-      // Step 2: Gemini Search Grounding for Live Context
       const ai = new GoogleGenAI({ apiKey: (process as any).env.API_KEY });
       const symbolsStr = TOP_SYMBOLS.slice(0, 5).map(s => s.s).join(', ');
       
@@ -381,38 +373,33 @@ const App: React.FC = () => {
       });
 
       setStocks(updatedData);
-      setLastSyncTime(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
+      setLastSyncTime(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
       
       if (!isInitial) {
         addToast({ title: 'Live Sync Successful', message: 'Current prices refreshed from live charts.', type: 'info' });
       }
     } catch (error) {
-      setStocks(TOP_SYMBOLS.map(sym => ({
-          symbol: sym.s,
-          name: sym.n,
-          price: sym.base,
-          change: 0,
-          changePercent: 0,
-          volume: 500000,
-          avgVolume: 450000,
-          dma50: sym.base * 0.97,
-          dma200: sym.base * 0.9,
-          peRatio: 20,
-          sectorPE: 22,
-          debtToEquity: 0.5,
-          mktCap: 'Large',
-          sector: sym.sector,
-          yoySalesGrowth: 10,
-          yoyProfitGrowth: 12,
-          epsGrowth: 8,
-          fiiHoldingChange: 0.1,
-          breakoutStatus: 'None'
-      })));
+      console.error(error);
     } finally {
       setLoading(false);
       setSyncLoading(false);
+      setCountdown(30); // Reset countdown after sync
     }
   }, []);
+
+  // Auto-sync timer effect
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setCountdown((prev) => {
+        if (prev <= 1) {
+          generateMockData();
+          return 30;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [generateMockData]);
 
   useEffect(() => {
     generateMockData(true);
@@ -554,12 +541,23 @@ const App: React.FC = () => {
             <span className="font-medium tracking-tight uppercase text-xs opacity-70">AI-Grounding Technical Engine</span>
             {lastSyncTime && (
               <span className="flex items-center gap-1 ml-4 text-[10px] bg-slate-800 px-2 py-0.5 rounded text-slate-400 border border-slate-700 font-mono">
-                <Clock className="h-3 w-3" /> SYNC: {lastSyncTime}
+                <Clock className="h-3 w-3" /> LAST SYNC: {lastSyncTime}
               </span>
             )}
           </div>
         </div>
         <div className="flex items-center gap-3">
+          <div className="flex items-center gap-3 bg-slate-900 border border-slate-800 px-4 py-2 rounded-xl">
+             <div className={`p-1.5 rounded-lg ${countdown <= 5 ? 'bg-red-500/20 text-red-400' : 'bg-slate-800 text-slate-400'}`}>
+                <Timer className={`h-4 w-4 ${syncLoading ? 'animate-spin' : ''}`} />
+             </div>
+             <div className="flex flex-col">
+                <span className="text-[9px] font-black uppercase text-slate-500 tracking-widest leading-none">Auto Sync</span>
+                <span className={`text-xs font-mono font-bold leading-tight ${countdown <= 5 ? 'text-red-400' : 'text-slate-200'}`}>
+                  00:{countdown.toString().padStart(2, '0')}
+                </span>
+             </div>
+          </div>
           <button 
             onClick={() => setIsAlertManagerOpen(true)}
             className="relative p-2.5 bg-slate-800 hover:bg-slate-700 rounded-xl transition-colors border border-slate-700 group"
@@ -575,7 +573,7 @@ const App: React.FC = () => {
             className="flex items-center gap-2 bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-800 px-5 py-2.5 rounded-xl transition-all border border-emerald-400/20 text-white font-bold text-sm shadow-xl shadow-emerald-500/10"
           >
             {syncLoading ? <RefreshCw className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
-            {syncLoading ? 'SYNCING...' : 'SYNC LIVE PRICES'}
+            {syncLoading ? 'SYNCING...' : 'SYNC NOW'}
           </button>
         </div>
       </header>
@@ -728,7 +726,6 @@ const App: React.FC = () => {
 
               <div className="p-8 grid grid-cols-1 lg:grid-cols-3 gap-10">
                 <div className="lg:col-span-2 space-y-10">
-                  {/* Score Widgets */}
                   <div className="grid grid-cols-2 md:grid-cols-4 gap-5">
                     {[
                       { label: 'Trend Strength', score: scoreData.trend, max: 25 },
@@ -752,7 +749,6 @@ const App: React.FC = () => {
                     ))}
                   </div>
 
-                  {/* Conviction & Levels */}
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
                     <div className={`p-8 rounded-3xl border-2 flex flex-col items-center justify-center gap-3 shadow-2xl relative overflow-hidden group ${getSignalBadge(scoreData.signal)}`}>
                         <div className="absolute top-0 right-0 p-4 opacity-10 group-hover:scale-150 transition-transform"><Activity className="h-20 w-20" /></div>
@@ -771,7 +767,6 @@ const App: React.FC = () => {
                     </div>
                   </div>
 
-                  {/* Chart */}
                   <div className="bg-slate-900 rounded-3xl border border-slate-800 overflow-hidden shadow-2xl p-1">
                     <div className="flex justify-between items-center p-4">
                        <div className="flex gap-2">
@@ -786,7 +781,6 @@ const App: React.FC = () => {
                     <TradingViewWidget symbol={selectedStock.symbol} exchange={selectedExchange} />
                   </div>
 
-                  {/* Fundamentals */}
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
                     <div className="bg-slate-900/50 rounded-2xl p-6 border border-slate-800">
                       <h4 className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-500 mb-6 flex items-center gap-2 border-b border-slate-800 pb-3">
@@ -1016,7 +1010,7 @@ const App: React.FC = () => {
       <footer className="max-w-7xl mx-auto mt-12 pt-8 border-t border-slate-900 flex flex-col md:flex-row justify-between items-center gap-4 text-slate-600 text-[10px] font-black uppercase tracking-[0.2em] pb-12">
         <div className="flex items-center gap-3">
           <TrendingUp className="h-4 w-4 opacity-50" />
-          <span>© 2025 NSE PROFIT SCANNER • GEMINI 3 FLASH GROUNDED</span>
+          <span>© 2025 NSE PROFIT SCANNER • AUTO-SYNCING LIVE FEED</span>
         </div>
         <div className="flex gap-8">
           <span className="text-emerald-500/50">Algorithmically Derived Signals</span>
