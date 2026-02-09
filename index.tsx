@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { createRoot } from 'react-dom/client';
 import { 
   TrendingUp, 
@@ -21,7 +21,10 @@ import {
   BellPlus,
   Trash2,
   CheckCircle2,
-  AlertCircle
+  AlertCircle,
+  CalendarDays,
+  Target,
+  ShieldAlert
 } from 'lucide-react';
 import { GoogleGenAI } from "@google/genai";
 
@@ -49,6 +52,8 @@ interface StockData {
   breakoutStatus: 'Confirmed' | 'Pending' | 'None';
 }
 
+type TradeSignal = 'BUY' | 'SELL' | 'HOLD';
+
 interface ScoreBreakdown {
   trend: number;
   volume: number;
@@ -60,6 +65,9 @@ interface ScoreBreakdown {
   sector: number;
   total: number;
   grade: string;
+  signal: TradeSignal;
+  stopLoss: number;
+  target: number;
 }
 
 interface StockAlert {
@@ -78,6 +86,49 @@ interface ToastMessage {
   message: string;
   type: 'success' | 'info' | 'alert';
 }
+
+// --- Components ---
+
+const TradingViewWidget: React.FC<{ symbol: string }> = ({ symbol }) => {
+  const container = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (container.current && (window as any).TradingView) {
+      container.current.innerHTML = '';
+      const widgetContainer = document.createElement('div');
+      widgetContainer.id = `tv_chart_${symbol}`;
+      widgetContainer.style.height = '400px';
+      widgetContainer.style.width = '100%';
+      container.current.appendChild(widgetContainer);
+
+      new (window as any).TradingView.widget({
+        autosize: true,
+        symbol: `NSE:${symbol}`,
+        interval: "D",
+        timezone: "Asia/Kolkata",
+        theme: "dark",
+        style: "1",
+        locale: "en",
+        toolbar_bg: "#f1f3f6",
+        enable_publishing: false,
+        hide_top_toolbar: false,
+        hide_legend: false,
+        save_image: false,
+        container_id: widgetContainer.id,
+        backgroundColor: "rgba(2, 6, 23, 1)",
+        gridColor: "rgba(30, 41, 59, 0.5)",
+      });
+    }
+  }, [symbol]);
+
+  return (
+    <div className="w-full bg-slate-950 rounded-xl overflow-hidden border border-slate-800" ref={container}>
+      <div className="h-[400px] flex items-center justify-center text-slate-500 italic text-sm">
+        Initializing Interactive NSE Chart...
+      </div>
+    </div>
+  );
+};
 
 // --- Mock Data Constants ---
 
@@ -157,7 +208,16 @@ const calculateScore = (stock: StockData): ScoreBreakdown => {
   else if (total >= 60) grade = 'C';
   else if (total >= 40) grade = 'D';
 
-  return { trend, volume, breakout, growth, financial, valuation, institutional, sector: sectorScore, total, grade };
+  // Signal Calculation
+  let signal: TradeSignal = 'HOLD';
+  if (total >= 75) signal = 'BUY';
+  else if (total < 45 || (stock.price < stock.dma200 && stock.changePercent < -2)) signal = 'SELL';
+
+  // Stop Loss & Target Calculation (Based on DMAs and Volatility)
+  const stopLoss = Math.min(stock.dma200, stock.price * 0.95);
+  const target = stock.price * (1 + (total / 500) + 0.05);
+
+  return { trend, volume, breakout, growth, financial, valuation, institutional, sector: sectorScore, total, grade, signal, stopLoss, target };
 };
 
 // --- Main Application Component ---
@@ -207,7 +267,6 @@ const App: React.FC = () => {
             message: `${stock.symbol} ${alert.type} is ${alert.condition.toLowerCase()} ${alert.threshold}. Current: ${alert.type === 'Price' ? formatCurrency(currentValue) : currentValue}`,
             type: 'alert'
           });
-          // Deactivate alert after trigger to prevent spam
           setAlerts(prev => prev.map(a => a.id === alert.id ? { ...a, active: false } : a));
         }
       });
@@ -328,21 +387,29 @@ const App: React.FC = () => {
     setAiLoading(true);
     setAiExplanation(null);
     try {
-      const score = calculateScore(stock);
+      const scoreData = calculateScore(stock);
       const ai = new GoogleGenAI({ apiKey: (process as any).env.API_KEY });
       const response = await ai.models.generateContent({
         model: 'gemini-3-flash-preview',
-        contents: `Analyze the following Indian stock data and explain its "Profit Potential Score" of ${score.total}/100 (Grade: ${score.grade}).
-        
-        Stock: ${stock.name} (${stock.symbol})
-        Price: ${formatCurrency(stock.price)} (${stock.changePercent.toFixed(2)}%)
-        Sector: ${stock.sector}
-        Trend: ${stock.price > stock.dma200 ? 'Bullish' : 'Bearish'} (above 200 DMA)
-        Volume: ${stock.volume > stock.avgVolume ? 'High' : 'Normal'}
-        Fundamental Growth: Sales ${stock.yoySalesGrowth.toFixed(1)}%, Profit ${stock.yoyProfitGrowth.toFixed(1)}%
-        Institutional: ${stock.fiiHoldingChange > 0 ? 'Buying' : 'Selling'}
-        
-        Provide a concise, professional summary for a swing trader including potential risks and why the score is ${score.total}. Use bullet points. Keep it under 150 words.`,
+        contents: `Analyze the following Indian stock data.
+
+Stock: ${stock.name} (${stock.symbol})
+Current Price: ${formatCurrency(stock.price)}
+Potential Score: ${scoreData.total}/100
+Current Signal: ${scoreData.signal}
+Proposed Target: ${formatCurrency(scoreData.target)}
+Proposed Stop Loss: ${formatCurrency(scoreData.stopLoss)}
+
+DMA Context: 50 DMA at ${formatCurrency(stock.dma50)}, 200 DMA at ${formatCurrency(stock.dma200)}
+Volume: ${stock.volume > stock.avgVolume ? 'High Surge' : 'Normal'}
+
+Please provide:
+1. SIGNAL VALIDATION: Why is the signal ${scoreData.signal}? 
+2. RISK/REWARD: Analyze the Stop Loss and Target levels provided.
+3. 1-WEEK OUTLOOK: Short-term price prediction range.
+4. SWING TRADING TIPS: Actionable advice for this specific stock.
+
+Keep headings clear and response concise (<200 words).`,
       });
       setAiExplanation(response.text);
     } catch (error) {
@@ -350,6 +417,14 @@ const App: React.FC = () => {
       setAiExplanation("Failed to generate AI analysis. Please check your API key.");
     } finally {
       setAiLoading(false);
+    }
+  };
+
+  const getSignalBadge = (signal: TradeSignal) => {
+    switch (signal) {
+      case 'BUY': return 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20';
+      case 'SELL': return 'bg-red-500/10 text-red-400 border-red-500/20';
+      case 'HOLD': return 'bg-yellow-500/10 text-yellow-400 border-yellow-500/20';
     }
   };
 
@@ -366,7 +441,7 @@ const App: React.FC = () => {
   };
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 p-4 md:p-8">
+    <div className="min-h-screen bg-slate-950 text-slate-100 p-4 md:p-8 font-['Inter']">
       {/* Toast Notifications */}
       <div className="fixed top-4 right-4 z-[100] flex flex-col gap-3 w-80">
         {toasts.map(toast => (
@@ -393,7 +468,7 @@ const App: React.FC = () => {
             <TrendingUp className="text-emerald-500 h-8 w-8" />
             Indian Stock <span className="text-emerald-500">Profit Scanner</span>
           </h1>
-          <p className="text-slate-400 mt-1">Real-time NSE scoring engine for swing & short-term trades</p>
+          <p className="text-slate-400 mt-1">Real-time NSE scoring engine with interactive live charts</p>
         </div>
         <div className="flex items-center gap-3">
           <button 
@@ -414,7 +489,7 @@ const App: React.FC = () => {
           </button>
           <div className="bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-3 py-1 rounded-full text-xs font-semibold flex items-center gap-2 status-glow-success">
             <span className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse"></span>
-            LIVE MARKET FEED
+            LIVE FEED
           </div>
         </div>
       </header>
@@ -423,9 +498,9 @@ const App: React.FC = () => {
       <div className="max-w-7xl mx-auto grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
         {[
           { label: 'Scanned Stocks', value: stocks.length, icon: Activity, color: 'text-blue-400' },
-          { label: 'Top Opportunities', value: stocks.filter(s => calculateScore(s).total > 80).length, icon: Zap, color: 'text-yellow-400' },
+          { label: 'BUY Signals', value: stocks.filter(s => calculateScore(s).signal === 'BUY').length, icon: Zap, color: 'text-emerald-400' },
           { label: 'Avg Mkt Score', value: Math.round(stocks.reduce((acc, s) => acc + calculateScore(s).total, 0) / (stocks.length || 1)), icon: PieChart, color: 'text-purple-400' },
-          { label: 'Active Alerts', value: alerts.filter(a => a.active).length, icon: Bell, color: 'text-emerald-400' },
+          { label: 'Active Alerts', value: alerts.filter(a => a.active).length, icon: Bell, color: 'text-yellow-400' },
         ].map((stat, i) => (
           <div key={i} className="bg-slate-900/50 border border-slate-800 p-4 rounded-xl flex items-center gap-4">
             <div className={`p-3 rounded-lg bg-slate-800 ${stat.color}`}>
@@ -476,7 +551,7 @@ const App: React.FC = () => {
                 <tr>
                   <th className="px-6 py-4 cursor-pointer hover:text-slate-200" onClick={() => handleSort('symbol')}>Stock / Sector</th>
                   <th className="px-6 py-4 cursor-pointer hover:text-slate-200" onClick={() => handleSort('price')}>Price</th>
-                  <th className="px-6 py-4 cursor-pointer hover:text-slate-200" onClick={() => handleSort('changePercent')}>1D Change</th>
+                  <th className="px-6 py-4 text-center">Signal</th>
                   <th className="px-6 py-4 hidden lg:table-cell cursor-pointer hover:text-slate-200" onClick={() => handleSort('volume')}>Volume</th>
                   <th className="px-6 py-4 text-center cursor-pointer hover:text-slate-200" onClick={() => handleSort('score')}>Score</th>
                   <th className="px-6 py-4 text-center">Grade</th>
@@ -491,7 +566,7 @@ const App: React.FC = () => {
                     </tr>
                   ))
                 ) : sortedStocks.map((stock) => {
-                  const score = calculateScore(stock);
+                  const scoreData = calculateScore(stock);
                   return (
                     <tr 
                       key={stock.symbol} 
@@ -502,13 +577,16 @@ const App: React.FC = () => {
                         <div className="font-bold text-slate-100 group-hover:text-emerald-400 transition-colors">{stock.symbol}</div>
                         <div className="text-xs text-slate-500 font-medium">{stock.name} • {stock.sector}</div>
                       </td>
-                      <td className="px-6 py-4 font-mono font-medium">
-                        {formatCurrency(stock.price)}
+                      <td className="px-6 py-4">
+                        <div className="font-mono font-medium">{formatCurrency(stock.price)}</div>
+                        <div className={`text-[10px] flex items-center gap-0.5 ${stock.changePercent >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                           {stock.changePercent >= 0 ? <ChevronUp className="h-2.5 w-2.5" /> : <ChevronDown className="h-2.5 w-2.5" />}
+                           {Math.abs(stock.changePercent).toFixed(2)}%
+                        </div>
                       </td>
-                      <td className={`px-6 py-4 font-semibold ${stock.changePercent >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                        <span className="flex items-center gap-1">
-                          {stock.changePercent >= 0 ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
-                          {Math.abs(stock.changePercent).toFixed(2)}%
+                      <td className="px-6 py-4 text-center">
+                        <span className={`px-2 py-0.5 rounded-full border text-[10px] font-black tracking-widest ${getSignalBadge(scoreData.signal)}`}>
+                          {scoreData.signal}
                         </span>
                       </td>
                       <td className="px-6 py-4 hidden lg:table-cell">
@@ -517,12 +595,12 @@ const App: React.FC = () => {
                       </td>
                       <td className="px-6 py-4 text-center">
                         <div className="inline-block px-3 py-1 rounded-full bg-slate-800 text-sm font-bold border border-slate-700">
-                          {score.total}
+                          {scoreData.total}
                         </div>
                       </td>
                       <td className="px-6 py-4 text-center">
-                        <div className={`inline-block px-3 py-1 rounded border text-xs font-black ${getGradeColor(score.grade)}`}>
-                          {score.grade}
+                        <div className={`inline-block px-3 py-1 rounded border text-xs font-black ${getGradeColor(scoreData.grade)}`}>
+                          {scoreData.grade}
                         </div>
                       </td>
                       <td className="px-6 py-4 text-right">
@@ -591,67 +669,74 @@ const App: React.FC = () => {
                   ))}
                 </div>
 
-                {/* TradingView Widget Placeholder */}
-                <div className="bg-slate-950 rounded-xl border border-slate-800 p-4 min-h-[400px] flex flex-col items-center justify-center relative">
-                   <div className="absolute top-4 left-4 text-xs font-mono text-slate-500 bg-slate-900 px-2 py-1 rounded">TRADINGVIEW ENGINE PREVIEW</div>
-                   <BarChart3 className="h-24 w-24 text-slate-800 mb-4" />
-                   <p className="text-slate-600 italic">Advanced Candlestick Chart for {selectedStock.symbol}:NSE</p>
-                   <div className="mt-8 flex gap-4">
-                     <div className="flex flex-col items-center">
-                       <span className="text-xs text-slate-500">50 DMA</span>
-                       <span className="text-emerald-500 font-mono font-bold">₹{selectedStock.dma50.toFixed(2)}</span>
-                     </div>
-                     <div className="flex flex-col items-center">
-                       <span className="text-xs text-slate-500">200 DMA</span>
-                       <span className="text-blue-500 font-mono font-bold">₹{selectedStock.dma200.toFixed(2)}</span>
-                     </div>
+                {/* Trading Signals Card */}
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                   <div className={`p-6 rounded-2xl border-2 flex flex-col items-center justify-center gap-2 ${getSignalBadge(calculateScore(selectedStock).signal)}`}>
+                      <p className="text-[10px] uppercase font-black opacity-60">Trading Signal</p>
+                      <p className="text-3xl font-black">{calculateScore(selectedStock).signal}</p>
+                   </div>
+                   <div className="p-6 rounded-2xl border bg-slate-800/50 border-emerald-500/20 flex flex-col items-center justify-center gap-2">
+                      <Target className="h-5 w-5 text-emerald-400" />
+                      <p className="text-[10px] uppercase font-black text-slate-500">Target Level</p>
+                      <p className="text-xl font-bold font-mono">{formatCurrency(calculateScore(selectedStock).target)}</p>
+                   </div>
+                   <div className="p-6 rounded-2xl border bg-slate-800/50 border-red-500/20 flex flex-col items-center justify-center gap-2">
+                      <ShieldAlert className="h-5 w-5 text-red-400" />
+                      <p className="text-[10px] uppercase font-black text-slate-500">Stop Loss</p>
+                      <p className="text-xl font-bold font-mono">{formatCurrency(calculateScore(selectedStock).stopLoss)}</p>
                    </div>
                 </div>
 
+                {/* Live TradingView Chart */}
+                <div className="relative group">
+                   <div className="absolute top-4 left-4 z-10 text-[10px] font-mono text-slate-400 bg-slate-900/80 px-2 py-1 rounded backdrop-blur-sm border border-slate-700 pointer-events-none">LIVE NSE CHART ENGINE</div>
+                   <TradingViewWidget symbol={selectedStock.symbol} />
+                </div>
+
                 {/* Key Fundamental Cards */}
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6 pb-8">
                   <div className="bg-slate-800/30 rounded-xl p-5 border border-slate-800">
-                    <h4 className="text-sm font-bold uppercase tracking-widest text-slate-400 mb-4 flex items-center gap-2">
-                      <BarChart3 className="h-4 w-4" /> Valuation & Financials
+                    <h4 className="text-[10px] font-bold uppercase tracking-widest text-slate-500 mb-4 flex items-center gap-2 border-b border-slate-700 pb-2">
+                      <ShieldCheck className="h-3 w-3" /> Valuation Metrics
                     </h4>
                     <div className="space-y-4">
                       <div className="flex justify-between">
-                        <span className="text-slate-400">P/E Ratio</span>
-                        <span className="font-mono">{selectedStock.peRatio.toFixed(2)} <span className="text-[10px] text-slate-500">(Sector: {selectedStock.sectorPE.toFixed(1)})</span></span>
+                        <span className="text-slate-400 text-sm">P/E Ratio</span>
+                        <span className="font-mono text-sm">{selectedStock.peRatio.toFixed(2)}</span>
                       </div>
                       <div className="flex justify-between">
-                        <span className="text-slate-400">Debt to Equity</span>
-                        <span className="font-mono">{selectedStock.debtToEquity.toFixed(2)}</span>
+                        <span className="text-slate-400 text-sm">Sector P/E</span>
+                        <span className="font-mono text-sm">{selectedStock.sectorPE.toFixed(1)}</span>
                       </div>
                       <div className="flex justify-between">
-                        <span className="text-slate-400">Institutional Change</span>
-                        <span className={`font-mono ${selectedStock.fiiHoldingChange > 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                          {selectedStock.fiiHoldingChange > 0 ? '+' : ''}{selectedStock.fiiHoldingChange.toFixed(2)}%
-                        </span>
+                        <span className="text-slate-400 text-sm">Debt/Equity</span>
+                        <span className="font-mono text-sm">{selectedStock.debtToEquity.toFixed(2)}</span>
                       </div>
                     </div>
                   </div>
 
                   <div className="bg-slate-800/30 rounded-xl p-5 border border-slate-800">
-                    <h4 className="text-sm font-bold uppercase tracking-widest text-slate-400 mb-4 flex items-center gap-2">
-                      <TrendingUp className="h-4 w-4" /> Growth Metrics (YoY)
+                    <h4 className="text-[10px] font-bold uppercase tracking-widest text-slate-500 mb-4 flex items-center gap-2 border-b border-slate-700 pb-2">
+                      <TrendingUp className="h-3 w-3" /> Growth & Flows
                     </h4>
                     <div className="space-y-4">
                       <div className="flex justify-between">
-                        <span className="text-slate-400">Sales Growth</span>
-                        <span className={`font-mono ${selectedStock.yoySalesGrowth > 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                        <span className="text-slate-400 text-sm">Sales Growth</span>
+                        <span className={`font-mono text-sm ${selectedStock.yoySalesGrowth > 0 ? 'text-emerald-400' : 'text-red-400'}`}>
                           {selectedStock.yoySalesGrowth.toFixed(1)}%
                         </span>
                       </div>
                       <div className="flex justify-between">
-                        <span className="text-slate-400">Profit Growth</span>
-                        <span className={`font-mono ${selectedStock.yoyProfitGrowth > 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                        <span className="text-slate-400 text-sm">Profit Growth</span>
+                        <span className={`font-mono text-sm ${selectedStock.yoyProfitGrowth > 0 ? 'text-emerald-400' : 'text-red-400'}`}>
                           {selectedStock.yoyProfitGrowth.toFixed(1)}%
                         </span>
                       </div>
                       <div className="flex justify-between">
-                        <span className="text-slate-400">EPS Growth</span>
-                        <span className="font-mono text-emerald-400">{selectedStock.epsGrowth.toFixed(1)}%</span>
+                        <span className="text-slate-400 text-sm">FII Holding</span>
+                        <span className={`font-mono text-sm ${selectedStock.fiiHoldingChange > 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                          {selectedStock.fiiHoldingChange > 0 ? '+' : ''}{selectedStock.fiiHoldingChange.toFixed(2)}%
+                        </span>
                       </div>
                     </div>
                   </div>
@@ -663,28 +748,48 @@ const App: React.FC = () => {
                 <div className="bg-slate-800 rounded-2xl p-6 border border-slate-700 shadow-lg">
                   <div className="flex items-center gap-2 mb-4">
                     <Zap className="h-5 w-5 text-yellow-400 fill-yellow-400" />
-                    <h3 className="font-bold text-lg">AI Recommendation</h3>
+                    <h3 className="font-bold text-lg">AI Signal Check</h3>
                   </div>
                   
                   {aiExplanation ? (
-                    <div className="text-slate-300 text-sm leading-relaxed prose prose-invert">
-                      {aiExplanation.split('\n').map((line, i) => <p key={i} className="mb-2">{line}</p>)}
+                    <div className="text-slate-300 text-xs leading-relaxed prose prose-invert overflow-hidden">
+                      {aiExplanation.split('\n').map((line, i) => {
+                        const isHeading = line.match(/^[0-9.]+\s*[A-Z\s]+:/) || line.match(/^[A-Z\s]+:$/);
+                        if (isHeading) {
+                          return (
+                            <h4 key={i} className="text-emerald-400 font-bold mt-5 mb-2 uppercase text-[9px] tracking-widest border-b border-emerald-500/10 pb-1">
+                              {line.replace(':', '')}
+                            </h4>
+                          );
+                        }
+                        return <p key={i} className="mb-2 text-slate-300">{line}</p>;
+                      })}
+                      
+                      <div className="mt-6 pt-4 border-t border-slate-700 flex items-center gap-3 bg-slate-900/50 -mx-6 px-6 py-4">
+                        <div className="p-2 bg-emerald-500/10 rounded-lg">
+                           <CalendarDays className="h-4 w-4 text-emerald-400" />
+                        </div>
+                        <div>
+                          <p className="text-[9px] text-slate-500 uppercase font-black">AI Trading Window</p>
+                          <p className="text-[10px] font-bold text-slate-200">Recommendation Valid: 5 Days</p>
+                        </div>
+                      </div>
                     </div>
                   ) : (
                     <div className="flex flex-col items-center justify-center py-8 text-center">
                       <div className="bg-slate-900 h-12 w-12 rounded-full flex items-center justify-center mb-4">
                         <Info className="h-6 w-6 text-slate-600" />
                       </div>
-                      <p className="text-slate-400 text-sm mb-6">Generate an AI-powered analysis of this stock's potential based on current market signals.</p>
+                      <p className="text-slate-400 text-xs mb-6">Validate the current BUY/SELL signal with Gemini AI market logic.</p>
                       <button 
                         onClick={() => getAiExplanation(selectedStock)}
                         disabled={aiLoading}
-                        className="w-full bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-bold py-3 rounded-xl transition-all shadow-lg flex items-center justify-center gap-2"
+                        className="w-full bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-bold py-3 rounded-xl transition-all shadow-lg flex items-center justify-center gap-2 text-sm"
                       >
                         {aiLoading ? (
-                          <><RefreshCw className="h-4 w-4 animate-spin" /> Analyzing...</>
+                          <><RefreshCw className="h-4 w-4 animate-spin" /> Cross-Checking Signals...</>
                         ) : (
-                          <>Explain this Score</>
+                          <>Analyze Trade Signal</>
                         )}
                       </button>
                     </div>
@@ -692,33 +797,32 @@ const App: React.FC = () => {
                 </div>
 
                 <div className="bg-blue-600/10 border border-blue-500/20 p-5 rounded-2xl">
-                  <h4 className="text-blue-400 font-bold mb-2 flex items-center gap-2 text-sm uppercase">
-                    <ShieldCheck className="h-4 w-4" /> Analyst Verdict
+                  <h4 className="text-blue-400 font-bold mb-2 flex items-center gap-2 text-[10px] uppercase">
+                    <ShieldCheck className="h-4 w-4" /> Risk Disclaimer
                   </h4>
-                  <p className="text-xs text-slate-400 leading-relaxed">
-                    This stock is currently showing {calculateScore(selectedStock).total > 70 ? 'strong bullish momentum' : 'consolidated movement'}. 
-                    Ideal entry for swing traders at levels {formatCurrency(selectedStock.price * 0.98)}.
+                  <p className="text-[10px] text-slate-400 leading-relaxed italic">
+                    Signals are generated via technical algorithms and AI analysis. Market conditions are volatile; always maintain your Stop Loss as recommended.
                   </p>
                 </div>
 
                 <div className="space-y-3">
-                  <button className="w-full bg-slate-100 hover:bg-white text-slate-950 font-bold py-4 rounded-xl transition-all shadow-xl flex items-center justify-center gap-2">
-                    Add to Watchlist
+                  <button className="w-full bg-slate-100 hover:bg-white text-slate-950 font-bold py-4 rounded-xl transition-all shadow-xl flex items-center justify-center gap-2 text-sm">
+                    Enter Trade Position
                   </button>
                   <button 
                     onClick={() => {
                       setNewAlertForm({
                         symbol: selectedStock.symbol,
                         type: 'Price',
-                        condition: 'Above',
-                        threshold: Math.round(selectedStock.price * 1.05)
+                        condition: 'Below',
+                        threshold: calculateScore(selectedStock).stopLoss
                       });
                       setIsAlertManagerOpen(true);
                       setSelectedStock(null);
                     }}
-                    className="w-full bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold py-4 rounded-xl border border-slate-700 flex items-center justify-center gap-2"
+                    className="w-full bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold py-4 rounded-xl border border-slate-700 flex items-center justify-center gap-2 text-sm"
                   >
-                    <BellPlus className="h-5 w-5" /> Set Price Alert
+                    <BellPlus className="h-5 w-5" /> Set Stop Loss Alert
                   </button>
                 </div>
               </div>
@@ -742,7 +846,7 @@ const App: React.FC = () => {
                 <h3 className="text-sm font-bold uppercase text-slate-400 mb-4">Create New Alert</h3>
                 <form onSubmit={createAlert} className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div>
-                    <label className="text-xs text-slate-500 mb-1 block">Stock Symbol</label>
+                    <label className="text-[10px] text-slate-500 mb-1 block uppercase">Stock Symbol</label>
                     <select 
                       className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-sm outline-none focus:ring-1 focus:ring-emerald-500"
                       value={newAlertForm.symbol || ''}
@@ -755,7 +859,7 @@ const App: React.FC = () => {
                   </div>
                   <div className="grid grid-cols-2 gap-2">
                     <div>
-                      <label className="text-xs text-slate-500 mb-1 block">Metric</label>
+                      <label className="text-[10px] text-slate-500 mb-1 block uppercase">Metric</label>
                       <select 
                         className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-sm outline-none focus:ring-1 focus:ring-emerald-500"
                         value={newAlertForm.type}
@@ -766,7 +870,7 @@ const App: React.FC = () => {
                       </select>
                     </div>
                     <div>
-                      <label className="text-xs text-slate-500 mb-1 block">Trigger</label>
+                      <label className="text-[10px] text-slate-500 mb-1 block uppercase">Trigger</label>
                       <select 
                         className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-sm outline-none focus:ring-1 focus:ring-emerald-500"
                         value={newAlertForm.condition}
@@ -778,12 +882,11 @@ const App: React.FC = () => {
                     </div>
                   </div>
                   <div>
-                    <label className="text-xs text-slate-500 mb-1 block">Threshold Value</label>
+                    <label className="text-[10px] text-slate-500 mb-1 block uppercase">Value</label>
                     <input 
                       type="number" 
                       className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-sm outline-none focus:ring-1 focus:ring-emerald-500"
                       value={newAlertForm.threshold || ''}
-                      placeholder={newAlertForm.type === 'Price' ? 'e.g. 2400' : 'e.g. 85'}
                       onChange={e => setNewAlertForm(prev => ({ ...prev, threshold: Number(e.target.value) }))}
                       required
                     />
@@ -811,10 +914,10 @@ const App: React.FC = () => {
                         <div>
                           <div className="font-bold flex items-center gap-2">
                             {alert.symbol} 
-                            {!alert.active && <span className="text-[10px] bg-slate-700 text-slate-400 px-1.5 rounded uppercase">Triggered</span>}
+                            {!alert.active && <span className="text-[10px] bg-slate-700 text-slate-400 px-1.5 rounded uppercase font-black">Triggered</span>}
                           </div>
                           <div className="text-xs text-slate-500">
-                            Notify when {alert.type} is {alert.condition.toLowerCase()} {alert.type === 'Price' ? formatCurrency(alert.threshold) : alert.threshold}
+                            Notify {alert.type} {alert.condition.toLowerCase()} {alert.type === 'Price' ? formatCurrency(alert.threshold) : alert.threshold}
                           </div>
                         </div>
                       </div>
@@ -831,15 +934,15 @@ const App: React.FC = () => {
       )}
 
       {/* Footer */}
-      <footer className="max-w-7xl mx-auto mt-12 pt-8 border-t border-slate-800 flex flex-col md:flex-row justify-between items-center gap-4 text-slate-500 text-sm pb-12">
+      <footer className="max-w-7xl mx-auto mt-12 pt-8 border-t border-slate-800 flex flex-col md:flex-row justify-between items-center gap-4 text-slate-500 text-xs pb-12">
         <div className="flex items-center gap-2">
           <TrendingUp className="h-4 w-4" />
-          <span>© 2025 StockProfitScanner. Powered by Gemini.</span>
+          <span>© 2025 StockProfitScanner • NSE Real-time Analytics Engine</span>
         </div>
         <div className="flex gap-6">
           <a href="#" className="hover:text-emerald-400 transition-colors">Privacy</a>
           <a href="#" className="hover:text-emerald-400 transition-colors">Terms</a>
-          <a href="#" className="hover:text-emerald-400 transition-colors">NSE Disclaimer</a>
+          <a href="#" className="hover:text-emerald-400 transition-colors font-bold">Disclaimer: Markets are subject to risk.</a>
         </div>
       </footer>
     </div>
